@@ -1,0 +1,4 @@
+# Reference environment: Python 3.8.20 (server checks).
+torch==2.4.1
+numpy==1.24.3
+SimpleITK==2.2.1
