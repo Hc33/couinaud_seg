@@ -1,4 +1,4 @@
-"""Explicit single-case inference for the confirmed three-stage model."""
+"""Run single-case inference with the three-stage AttentionCoLearningNet."""
 import argparse
 import json
 import random
@@ -8,12 +8,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from models import Attention_MT_Networks_with_L0
+from models import AttentionCoLearningNet
 from data import load_case, load_pickle, save_predictions
 
 
-MODEL_NAME = "Attention_MT_Networks_with_L0"
-MODEL_ARGUMENTS = dict(in_ch=1, out_ch_1=3, out_ch_2=9, dropout=True)
+MODEL_NAME = "AttentionCoLearningNet"
+MODEL_ARGUMENTS = dict(in_ch=1, vessel_classes=3, couinaud_classes=9, dropout=True)
 
 
 def read_config(path):
@@ -31,27 +31,27 @@ def read_config(path):
 
 def load_model(config):
     if config["model"] != MODEL_NAME or config["model_kwargs"] != MODEL_ARGUMENTS:
-        raise ValueError("Only Attention_MT_Networks_with_L0(1, 3, 9, dropout=True) is confirmed.")
+        raise ValueError("Only AttentionCoLearningNet(1, 3, 9, dropout=True) is confirmed.")
     device = torch.device(config["device"])
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available. Set device to cpu.")
     checkpoint = config["checkpoints"][str(config["fold"])]
-    model = Attention_MT_Networks_with_L0(**config["model_kwargs"])
+    model = AttentionCoLearningNet(**config["model_kwargs"])
     state = torch.load(checkpoint, map_location="cpu", weights_only=True)
     model.load_state_dict(state, strict=True)
     return model.to(device).eval()
 
 
 def predict(model, ct_nda):
-    """Legacy _inference_one_case; only device placement is configurable."""
+    """Return vessel and Couinaud softmax tensors for one normalized CT array."""
     device = next(model.parameters()).device
     with torch.no_grad():
         ct_nda = torch.FloatTensor(ct_nda).to(device)
         ct_nda = ct_nda.unsqueeze(0).unsqueeze(0)
-        out1_tensor, out2_tensor = model(ct_nda)
-        out1_tensor = F.softmax(out1_tensor, dim=1)
-        out2_tensor = F.softmax(out2_tensor, dim=1)
-    return out1_tensor, out2_tensor
+        vessel_probabilities, couinaud_probabilities = model(ct_nda)
+        vessel_probabilities = F.softmax(vessel_probabilities, dim=1)
+        couinaud_probabilities = F.softmax(couinaud_probabilities, dim=1)
+    return vessel_probabilities, couinaud_probabilities
 
 
 def run(config):

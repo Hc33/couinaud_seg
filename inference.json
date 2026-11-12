@@ -1,9 +1,9 @@
 {
-  "model": "Attention_MT_Networks_with_L0",
+  "model": "AttentionCoLearningNet",
   "model_kwargs": {
     "in_ch": 1,
-    "out_ch_1": 3,
-    "out_ch_2": 9,
+    "vessel_classes": 3,
+    "couinaud_classes": 9,
     "dropout": true
   },
   "checkpoints": {

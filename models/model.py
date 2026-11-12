@@ -1,110 +1,95 @@
-"""Attention block with L0 regularization.
-Selected three-stage model from code/architecture/networks_with_l0.py.
-Class bodies and parameter names are unchanged.
-"""
+"""Three-stage attention-based co-learning network for vessels and Couinaud segments."""
 import torch
 import torch.nn as nn
-from .layers import (ConvBnAct3d, InputTransition, DownTrasition,
-                     Upsample_block, UpTransition_block, OutputTransition,
-                     Channel_Attention, Spatial_Attention)
-from .ir import SimpleBlock_L0
+from .layers import (ConvBnAct3d, InputTransition, DownTransition,
+                     UpsampleBlock, DecoderFusionBlock, OutputTransition,
+                     ChannelAttention, SpatialAttention)
+from .ir import InformationRoutingBlock
 
 
-class Sharing_with_CASA_L0Block(nn.Module):
-    """
-    CASA_with_SimpleBlock_L0
-    Attention with 2 inputs, x_from_branch_1(x_1), x_from_branch_2(x_2),
-    Channel + Spatial Attention.  Channel first
-    """
-    def __init__(self, in_ch, out_ch, dropout = False):
-        super(Sharing_with_CASA_L0Block, self).__init__()
+class AttentionSharingBlock(nn.Module):
+    """ACB feature aggregation followed by separate vessel and Couinaud IR blocks."""
+    def __init__(self, in_ch, out_ch, dropout=False):
+        super(AttentionSharingBlock, self).__init__()
         self.F_tr = ConvBnAct3d(in_ch, out_ch)
-        self.CA = Channel_Attention(out_ch, out_ch)
-        self.SA = Spatial_Attention(out_ch, out_ch)
-        self.l0_block_0 = SimpleBlock_L0(out_ch, out_ch)
-        self.l0_block_1 = SimpleBlock_L0(out_ch, out_ch)
+        self.CA = ChannelAttention(out_ch, out_ch)
+        self.SA = SpatialAttention(out_ch, out_ch)
+        self.l0_block_0 = InformationRoutingBlock(out_ch, out_ch)
+        self.l0_block_1 = InformationRoutingBlock(out_ch, out_ch)
 
-    def forward(self, x_1, x_2):
-        x_cat = torch.cat((x_1, x_2), dim=1)
-        x_fusion = self.F_tr(x_cat)
-        x_ca = self.CA(x_fusion)
-        x = self.SA(x_ca)
-        out_1, out_2 = self.l0_block_0(x), self.l0_block_1(x)
-        # out_1, out_2 = x_1+x, x_2+x
-        return out_1, out_2
+    def forward(self, vessel_features, couinaud_features):
+        joint_features = torch.cat((vessel_features, couinaud_features), dim=1)
+        fused_features = self.F_tr(joint_features)
+        channel_features = self.CA(fused_features)
+        attended_features = self.SA(channel_features)
+        vessel_routing, couinaud_routing = self.l0_block_0(attended_features), self.l0_block_1(attended_features)
+        return vessel_routing, couinaud_routing
 
 
-class Attention_MT_Networks_with_L0(nn.Module):
-    """
-    3 stage, CASA+L0
-    L0Block
-    3 downsample, 2 decoder branches, Mix transition with attention inside
-    Attention sharing here : CA SA, just like SENet.
-    SENet: Squeeze-and-Excitation Networks, 
-    """
-    def __init__(self, in_ch, out_ch_1, out_ch_2, dropout=False):
-        super(Attention_MT_Networks_with_L0, self).__init__()
-        a, b, c = 32, 64, 128
-        # a, b, c = 64, 128, 256
+class AttentionCoLearningNet(nn.Module):
+    """Shared encoder and two task decoders coupled by attention and information routing."""
+    def __init__(self, in_ch, vessel_classes, couinaud_classes, dropout=False):
+        super(AttentionCoLearningNet, self).__init__()
+        channels1, channels2, channels3 = 32, 64, 128
         self.in_tr = InputTransition(in_ch, 16)
-        self.down_tr32 = DownTrasition( 16, a, depth=1, dropout=dropout)
-        self.down_tr64 = DownTrasition( a, b, depth=2, dropout=dropout)
-        self.down_tr128 = DownTrasition( b, c, depth=2, dropout=dropout)
+        self.down_tr32 = DownTransition(16, channels1, depth=1, dropout=dropout)
+        self.down_tr64 = DownTransition(channels1, channels2, depth=2, dropout=dropout)
+        self.down_tr128 = DownTransition(channels2, channels3, depth=2, dropout=dropout)
 
-        # decoder branch 1
-        self.up_sa128_b1 = Upsample_block( c, c, dropout=dropout)  # b1 <-> branch 1
-        self.up_tr128_b1 = UpTransition_block( c, depth=2, dropout=dropout)
+        # Vessel decoder
+        self.up_sa128_b1 = UpsampleBlock(channels3, channels3, dropout=dropout)
+        self.up_tr128_b1 = DecoderFusionBlock(channels3, depth=2, dropout=dropout)
 
-        self.up_sa64_b1 = Upsample_block( c, b, dropout=dropout)
-        self.up_tr64_b1 = UpTransition_block( b, depth=2, dropout=dropout)
+        self.up_sa64_b1 = UpsampleBlock(channels3, channels2, dropout=dropout)
+        self.up_tr64_b1 = DecoderFusionBlock(channels2, depth=2, dropout=dropout)
         
-        self.up_sa32_b1 = Upsample_block( b, a, dropout=dropout)
-        self.up_tr32_b1 = UpTransition_block( a, depth=1, dropout=dropout)
+        self.up_sa32_b1 = UpsampleBlock(channels2, channels1, dropout=dropout)
+        self.up_tr32_b1 = DecoderFusionBlock(channels1, depth=1, dropout=dropout)
         
-        self.out_tr_b1 = OutputTransition( a, out_ch_1)
+        self.out_tr_b1 = OutputTransition(channels1, vessel_classes)
 
-        # decoder branch 2
-        self.up_sa128_b2 = Upsample_block( c, c, dropout=dropout)  # b2 <-> branch 2
-        self.up_tr128_b2 = UpTransition_block( c, depth=2, dropout=dropout)
+        # Couinaud decoder
+        self.up_sa128_b2 = UpsampleBlock(channels3, channels3, dropout=dropout)
+        self.up_tr128_b2 = DecoderFusionBlock(channels3, depth=2, dropout=dropout)
         
-        self.up_sa64_b2 = Upsample_block( c, b, dropout=dropout)
-        self.up_tr64_b2 = UpTransition_block( b, depth=2, dropout=dropout)
+        self.up_sa64_b2 = UpsampleBlock(channels3, channels2, dropout=dropout)
+        self.up_tr64_b2 = DecoderFusionBlock(channels2, depth=2, dropout=dropout)
         
-        self.up_sa32_b2 = Upsample_block( b, a, dropout=dropout)
-        self.up_tr32_b2 = UpTransition_block( a, depth=1, dropout=dropout)
+        self.up_sa32_b2 = UpsampleBlock(channels2, channels1, dropout=dropout)
+        self.up_tr32_b2 = DecoderFusionBlock(channels1, depth=1, dropout=dropout)
         
-        self.out_tr_b2 = OutputTransition( a, out_ch_2)
+        self.out_tr_b2 = OutputTransition(channels1, couinaud_classes)
 
-        # mix transition
-        self.mix1 = Sharing_with_CASA_L0Block(in_ch= c*2, out_ch= c, dropout=False)
-        self.mix2 = Sharing_with_CASA_L0Block(in_ch= b*2, out_ch= b, dropout=False)
-        self.mix3 = Sharing_with_CASA_L0Block(in_ch= a*2, out_ch= a, dropout=False)
+        # ACB and task-specific IR at each decoder stage
+        self.mix1 = AttentionSharingBlock(in_ch=channels3*2, out_ch=channels3, dropout=False)
+        self.mix2 = AttentionSharingBlock(in_ch=channels2*2, out_ch=channels2, dropout=False)
+        self.mix3 = AttentionSharingBlock(in_ch=channels1*2, out_ch=channels1, dropout=False)
 
-    def forward(self, x):        
-        out16 = self.in_tr(x)
-        out32 = self.down_tr32(out16)
-        out64 = self.down_tr64(out32)
-        out128 = self.down_tr128(out64)
+    def forward(self, ct):        
+        stem_features = self.in_tr(ct)
+        encoder1 = self.down_tr32(stem_features)
+        encoder2 = self.down_tr64(encoder1)
+        encoder3 = self.down_tr128(encoder2)
 
-        upcat128_1 = self.up_sa128_b1(out128, out64) # _1 <-> output from branch 1
-        upcat128_2 = self.up_sa128_b2(out128, out64) # _2 <-> output from branch 2
-        mix1_1, mix1_2 = self.mix1(upcat128_1, upcat128_2)
-        uptr64_1 = self.up_tr128_b1(upcat128_1, mix1_1) 
-        uptr64_2 = self.up_tr128_b2(upcat128_2, mix1_2)
+        vessel_up3 = self.up_sa128_b1(encoder3, encoder2)
+        couinaud_up3 = self.up_sa128_b2(encoder3, encoder2)
+        vessel_ir3, couinaud_ir3 = self.mix1(vessel_up3, couinaud_up3)
+        vessel_dec3 = self.up_tr128_b1(vessel_up3, vessel_ir3) 
+        couinaud_dec3 = self.up_tr128_b2(couinaud_up3, couinaud_ir3)
 
-        upcat64_1 = self.up_sa64_b1(uptr64_1, out32)
-        upcat64_2 = self.up_sa64_b2(uptr64_2, out32)
-        mix2_1, mix2_2 = self.mix2(upcat64_1, upcat64_2)
-        uptr32_1 = self.up_tr64_b1(upcat64_1, mix2_1)
-        uptr32_2 = self.up_tr64_b2(upcat64_2, mix2_2)
+        vessel_up2 = self.up_sa64_b1(vessel_dec3, encoder1)
+        couinaud_up2 = self.up_sa64_b2(couinaud_dec3, encoder1)
+        vessel_ir2, couinaud_ir2 = self.mix2(vessel_up2, couinaud_up2)
+        vessel_dec2 = self.up_tr64_b1(vessel_up2, vessel_ir2)
+        couinaud_dec2 = self.up_tr64_b2(couinaud_up2, couinaud_ir2)
 
-        upcat32_1 = self.up_sa32_b1(uptr32_1, out16)
-        upcat32_2 = self.up_sa32_b2(uptr32_2, out16)
-        mix3_1, mix3_2 = self.mix3(upcat32_1, upcat32_2)
-        uptr16_1 = self.up_tr32_b1(upcat32_1, mix3_1)
-        uptr16_2 = self.up_tr32_b2(upcat32_2, mix3_2)
+        vessel_up1 = self.up_sa32_b1(vessel_dec2, stem_features)
+        couinaud_up1 = self.up_sa32_b2(couinaud_dec2, stem_features)
+        vessel_ir1, couinaud_ir1 = self.mix3(vessel_up1, couinaud_up1)
+        vessel_dec1 = self.up_tr32_b1(vessel_up1, vessel_ir1)
+        couinaud_dec1 = self.up_tr32_b2(couinaud_up1, couinaud_ir1)
 
-        out_1 = self.out_tr_b1(uptr16_1)  # 8, 3, 64, 64, 64
-        out_2 = self.out_tr_b2(uptr16_2)
+        vessel_logits = self.out_tr_b1(vessel_dec1)
+        couinaud_logits = self.out_tr_b2(couinaud_dec1)
 
-        return out_1, out_2
+        return vessel_logits, couinaud_logits

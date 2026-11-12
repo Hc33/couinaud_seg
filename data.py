@@ -1,6 +1,4 @@
-"""Original NPZ preprocessing and label restoration, with explicit paths.
-Source: code/inference_mt_3d_torch.py. No evaluation definitions are changed.
-"""
+"""Load preprocessed CT arrays and restore vessel and Couinaud label maps."""
 import pickle
 from pathlib import Path
 import numpy as np
@@ -16,60 +14,47 @@ def load_pickle(pkl_file):
 
 
 def load_case(input_path, properties):
-    """
-    load ndarray
-    """
-    # 0. load ndarray
+    """Load and normalize CT from an NPZ file and return vessel and Couinaud labels."""
+
     np_file = str(input_path)
     ndarray = np.load(np_file, "r")["data"]
     ct_ndarray = ndarray[0]
-    seg_1_ndarray = ndarray[2]  # vessel
-    seg_2_ndarray = ndarray[3]  # seg8
-    
+    vessel_labels = ndarray[2]
+    couinaud_labels = ndarray[3]
+
     _mean = properties["liver_intensity_mean"]
     _std = properties["liver_intensity_std"]
     _intensity_00_5 = properties["liver_intensity_00_5"]
     _intensity_99_5 = properties["liver_intensity_99_5"]
 
-    # 1. CT normalization 
+
     ct_ndarray = np.clip(ct_ndarray, a_min=_intensity_00_5, a_max=_intensity_99_5)
     ct_ndarray = (ct_ndarray - _mean) / _std
 
-    return ct_ndarray, seg_1_ndarray, seg_2_ndarray
+    return ct_ndarray, vessel_labels, couinaud_labels
 
 
 def resample_mask_to_origin(mask_ndarray, pkl_content):
-    """
-    将模型预测结果根据预存数据(pkl_content)处理成最初形式
-    过程: 
-    1.128^3数据重采样恢复尺寸, croppoed_size
-    2.图像非零区域回填
-    3.方向、原点、间距参数
-    :paras:
-    image:sitk读取的image信息, 这里是体数据
-    target_spacing:指定的spacing, 例如[1,1,1]
-    resamplemethod:插值类型
-    return: 重采样后的数据
-    """
-    # 1. zoom to size before resize
-    num_class = mask_ndarray.size(1) 
+    """Restore a [1, C, Z, Y, X] tensor to a SimpleITK label image using saved crop and image geometry."""
+
+    num_class = mask_ndarray.size(1)
     mask_size = mask_ndarray.size()[2:]
     target_size = pkl_content["cropped_size"]
     resize_ratio = target_size / mask_size
     zoomed_mask_nda = F.interpolate(mask_ndarray, scale_factor=tuple(resize_ratio), mode='trilinear')
-    # zoomed_mask_nda = ndimage.zoom(mask_ndarray, zoom=resize_ratio, order=3) # order 0 for mask
-    # 2. re-fill
+
+
     nonzero_z_min = pkl_content["before_crop_nonzero_region_z_min"]
     nonzero_z_max = pkl_content["before_crop_nonzero_region_z_max"] + 1
     nonzero_y_min = pkl_content["before_crop_nonzero_region_y_min"]
     nonzero_y_max = pkl_content["before_crop_nonzero_region_y_max"] + 1
-    nonzero_x_min = pkl_content["before_crop_nonzero_region_x_min"] 
+    nonzero_x_min = pkl_content["before_crop_nonzero_region_x_min"]
     nonzero_x_max = pkl_content["before_crop_nonzero_region_x_max"] + 1
     size_after_resample = pkl_content["size_after_resample"]
     refill_nda = torch.zeros(tuple(np.concatenate([[1, num_class], size_after_resample])))
     refill_nda[:, :, nonzero_z_min:nonzero_z_max, nonzero_y_min:nonzero_y_max, nonzero_x_min:nonzero_x_max] = zoomed_mask_nda
 
-    # 3.trans-resample
+
     origin_size = pkl_content["original_size_of_raw_data"]
     resample_ratio = origin_size / size_after_resample
     back_nda = F.interpolate(refill_nda, scale_factor=tuple(resample_ratio), mode='trilinear')
@@ -78,8 +63,8 @@ def resample_mask_to_origin(mask_ndarray, pkl_content):
     squeeze_nda = torch.squeeze(argmax_nda)
 
     np_nda = squeeze_nda.cpu().numpy().astype(np.uint8)
-    
-    # 4. set other params
+
+
     new_image = sitk.GetImageFromArray(np_nda)
     new_image.SetDirection(pkl_content["itk_direction"])
     new_image.SetOrigin(pkl_content["itk_orgin"])
@@ -88,11 +73,7 @@ def resample_mask_to_origin(mask_ndarray, pkl_content):
 
 
 def threshold_for_export(pred1_, pred2_):
-    """Keep the thresholding that preceded visualization in the old run.
-
-    The original Hausdorff routine changed these tensors in place. Here the
-    same assignments operate on copies, so raw probabilities remain available.
-    """
+    """Return copies of both probability tensors thresholded at 0.5."""
     pred1_, pred2_ = pred1_.clone(), pred2_.clone()
     threshold = 0.5
     pred1_[pred1_ >= threshold] = 1
@@ -103,7 +84,7 @@ def threshold_for_export(pred1_, pred2_):
 
 
 def save_predictions(probabilities, metadata, output_dir, save_probabilities=True):
-    """Write the two original-space label maps using the legacy label path."""
+    """Write vessel and Couinaud label maps in the original image geometry."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {}

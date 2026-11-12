@@ -1,4 +1,4 @@
-"""Required L0 components from code/architecture/l0_layer.py, unchanged."""
+"""Retained custom L0 convolution and residual information-routing block."""
 import math
 import torch
 import torch.nn as nn
@@ -125,15 +125,15 @@ class L0Conv3d(Module):
         """Sample the hard-concrete gates for training and use a deterministic value for testing"""
         if sample:
             eps = self.get_eps(self.floatTensor(batch_size, self.dim_z))  # 均匀分布
-            z = self.quantile_concrete(eps).view(batch_size, self.dim_z, 1, 1, 1)  # 2d -> 3d
+            z = self.quantile_concrete(eps).view(batch_size, self.dim_z, 1, 1, 1)
             return F.hardtanh(z, min_val=0, max_val=1)
-        else:  # mode
-            pi = torch.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1, 1) # 2d -> 3d
+        else:
+            pi = torch.sigmoid(self.qz_loga).view(1, self.dim_z, 1, 1, 1)
             return F.hardtanh(pi * (limit_b - limit_a) + limit_a, min_val=0, max_val=1)
 
     def sample_weights(self):
         z = self.quantile_concrete(self.get_eps(self.floatTensor(self.dim_z))).view(self.dim_z, 1, 1, 1)
-        return F.hardtanh(z, min_val=0, max_val=1)* self.weights # (x-1)/2改动为x的 hard-sigmoid实现方式
+        return F.hardtanh(z, min_val=0, max_val=1)* self.weights
 
     def forward(self, input_):
         if self.input_shape is None:
@@ -141,7 +141,7 @@ class L0Conv3d(Module):
         b = None if not self.use_bias else self.bias
         if self.local_rep or not self.training:
             output = F.conv3d(input_, self.weights, b, self.stride, self.padding, self.dilation, self.groups)
-            z = self.sample_z(output.size(0), sample=self.training)  # 
+            z = self.sample_z(output.size(0), sample=self.training)
             return output.mul(z)
         else:
             weights = self.sample_weights()
@@ -216,14 +216,14 @@ class MAPConv3d(Module):
 
         num_instances_per_filter = ((self.input_shape[1] - self.kernel_size[0] + 2 * self.padding[0]) / self.stride[0]) + 1  # for rows
         num_instances_per_filter *= ((self.input_shape[2] - self.kernel_size[1] + 2 * self.padding[1]) / self.stride[1]) + 1  # multiplying with cols
-        # num_instances_per_filter *= () # how with depth?
+
 
         flops_per_filter = num_instances_per_filter * flops_per_instance
         expected_flops = flops_per_filter * ppos  # multiply with number of filters
         expected_l0 = n * ppos
 
         if self.bias is not None:
-            # since the gate is applied to the output we also reduce the bias computation
+
             expected_flops += num_instances_per_filter * ppos
             expected_l0 += ppos
 
@@ -252,10 +252,11 @@ class MAPConv3d(Module):
         return s.format(name=self.__class__.__name__, **self.__dict__)
 
 
-class SimpleBlock_L0(nn.Module):
+class InformationRoutingBlock(nn.Module):
+    """Residual IR block with the retained L0 convolution and train/eval branches."""
     def __init__(self, in_planes, out_planes, stride=1, droprate_init=0.0, weight_decay=0., lamba=0.01, local_rep=False,
                  temperature=2./3.):
-        super(SimpleBlock_L0, self).__init__()
+        super(InformationRoutingBlock, self).__init__()
         self.bn1 = nn.BatchNorm3d(in_planes)
         self.conv1 = L0Conv3d(in_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False,
                               droprate_init=droprate_init, weight_decay=weight_decay / (1 - 0.3), local_rep=local_rep,
